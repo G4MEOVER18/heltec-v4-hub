@@ -21,6 +21,11 @@
 extern "C" {
 #include "ukfe_rf.h"
 }
+// --- V4-Executor: fuehrt Angriffe SELBST aus (One Piece) ---
+#include "wifi_attack.h"   // Deauth/Beacon/Scan
+#include "evil_portal.h"   // Evil Twin (SoftAP + Captive-DNS + Login-Harvest)
+#include "wifi_recon.h"    // Handshake/Probe/PacketMon/Pwnagotchi/Wardrive
+#include "ble_spam.h"      // BLE-Spam/Scan
 
 // ---- V4-Pins (kompatibel zu V3) ----
 #define PIN_OLED_SDA   17
@@ -44,10 +49,8 @@ extern "C" {
 #define PIN_VGNSS_CTRL 34
 
 static const uint8_t BROADCAST_MAC[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-static const uint8_t UKFE_SECRET[UKFE_RF_SECRET_LEN] = {
-    0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
-    0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF,
-};
+#include "secret.h"
+static const uint8_t UKFE_SECRET[UKFE_RF_SECRET_LEN] = UKFE_RF_SECRET_INIT;
 
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C oled(U8G2_R0, PIN_OLED_RST, PIN_OLED_SCL, PIN_OLED_SDA);
 TinyGPSPlus gps;
@@ -113,6 +116,36 @@ static void relay_frame(const uint8_t* frame, size_t real_len, const UkfeRfMessa
     digitalWrite(PIN_LED, LOW);
 }
 
+// V4 fuehrt den Befehl SELBST aus (One Piece) — zusaetzlich zum Relay an die Satelliten.
+static void act(const UkfeRfMessage* m) {
+    char t[22];
+    switch(m->cmd) {
+    case UkfeRfCmdWifiScan: { uint8_t n = wifi_attack_scan();
+        snprintf(t, sizeof(t), "WiFi: %u APs", n); toast(t); break; }
+    case UkfeRfCmdWifiDeauth:
+        if(m->arg_len >= 6) { wifi_attack_deauth(m->args, m->arg_len >= 7 ? m->args[6] : 0, 0); toast("Deauth laeuft"); }
+        break;
+    case UkfeRfCmdBeaconSpam: wifi_attack_beacon(m->arg_len ? m->args[0] : 0, 0); toast("Beacon-Spam"); break;
+    case UkfeRfCmdEvilPortal: evil_portal_start(m->arg_len ? m->args[0] : 0, ESPNOW_CHANNEL); toast("Evil Twin"); break;
+    case UkfeRfCmdHandshake:
+        if(m->arg_len >= 7) { wifi_recon_handshake(m->args, m->args[6], 0); toast("Handshake"); }
+        break;
+    case UkfeRfCmdWardrive: { uint8_t n = wifi_recon_wardrive(); snprintf(t, sizeof(t), "Wardrive %u", n); toast(t); break; }
+    case UkfeRfCmdProbeSniff:  wifi_recon_probe(0);      toast("Probe-Sniff"); break;
+    case UkfeRfCmdPacketMon:   wifi_recon_packetmon(0);  toast("PacketMon"); break;
+    case UkfeRfCmdPwnagotchi:  wifi_recon_pwnagotchi(0); toast("Pwnagotchi"); break;
+    case UkfeRfCmdBleScan: { uint8_t n = ble_scan(m->arg_len ? (uint32_t)m->args[0] * 1000 : 3000);
+        snprintf(t, sizeof(t), "BLE: %u", n); toast(t); break; }
+    case UkfeRfCmdBleSpam:   ble_spam_start(m->arg_len ? m->args[0] : 0); toast("BLE-Spam"); break;
+    case UkfeRfCmdSourApple:  ble_spam_start(1); toast("Sour Apple"); break;
+    case UkfeRfCmdWifiStop:
+        wifi_attack_stop(); evil_portal_stop(); wifi_recon_stop(); toast("Stop"); break;
+    case UkfeRfCmdAbort:
+        ble_spam_stop(); wifi_attack_stop(); evil_portal_stop(); wifi_recon_stop(); toast("Abort"); break;
+    default: break;   // Status/Ping/LoRa/GPS/HID: bestehendes Verhalten / spaetere Phasen
+    }
+}
+
 static void scan_and_relay() {
     while(s_len >= UKFE_RF_HDR_OVERHEAD) {
         size_t i = 0; bool found = false;
@@ -128,7 +161,9 @@ static void scan_and_relay() {
         if(s_len < real_len) return;
         UkfeRfMessage msg;
         if(ukfe_rf_parse_frame(UKFE_SECRET, s_buf, real_len, &msg, &s_flipperCounter)) {
-            s_rxFromFlipper++; relay_frame(s_buf, real_len, &msg);
+            s_rxFromFlipper++;
+            relay_frame(s_buf, real_len, &msg);   // an Satelliten weiterfunken
+            act(&msg);                            // + V4 fuehrt selbst aus (One Piece)
         } else s_rejected++;
         memmove(s_buf, s_buf + real_len, s_len - real_len); s_len -= real_len;
     }
@@ -315,6 +350,8 @@ void setup() {
         esp_now_peer_info_t bp = {}; memcpy(bp.peer_addr, BROADCAST_MAC, 6);
         bp.channel = ESPNOW_CHANNEL; bp.encrypt = false; esp_now_add_peer(&bp);
     }
+    wifi_attack_init(ESPNOW_CHANNEL);   // Executor-Module kennen den ESP-NOW-Kanal
+    wifi_recon_init(ESPNOW_CHANNEL);
     Serial.printf("\nG4MEOVER V4 bereit. LoRa %s, ESP-NOW k%d. MAC %s\n",
                   s_loraOk ? "ok" : "ERR", ESPNOW_CHANNEL, WiFi.macAddress().c_str());
     toast("Bereit");
@@ -323,6 +360,9 @@ void setup() {
 static uint32_t s_lastRender = 0;
 
 void loop() {
+    // V4-Executor: laufende Angriffe bedienen (nicht-blockierend)
+    wifi_attack_tick(); evil_portal_tick(); wifi_recon_tick(); ble_spam_tick();
+
     // Flipper-UART + USB-CDC -> Frames relayen
     while(FlipperSerial.available() && s_len < sizeof(s_buf)) { s_buf[s_len++] = FlipperSerial.read(); s_rawBytes++; }
     while(Serial.available() && s_len < sizeof(s_buf)) { s_buf[s_len++] = Serial.read(); s_rawBytes++; }

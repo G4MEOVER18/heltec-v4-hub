@@ -48,6 +48,7 @@ typedef enum {
     UkfeRfCmdGpsWardrive = 0x41,
     UkfeRfCmdHidPayload  = 0x50,  // args: uint8 idx
     UkfeRfCmdHidDucky    = 0x51,  // args: uint8 script_id
+    UkfeRfCmdLoraJoin    = 0x60,  // On-Demand LoRaWAN-OTAA-Join (TTN) + Status-Uplink
 } UkfeRfCmd;
 
 // ---- Responses (Heltec -> Flipper), Bit7 gesetzt ----

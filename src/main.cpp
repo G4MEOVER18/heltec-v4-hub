@@ -26,6 +26,7 @@ extern "C" {
 #include "evil_portal.h"   // Evil Twin (SoftAP + Captive-DNS + Login-Harvest)
 #include "wifi_recon.h"    // Handshake/Probe/PacketMon/Pwnagotchi/Wardrive
 #include "ble_spam.h"      // BLE-Spam/Scan
+#include "lorawan_link.h"  // On-Demand-LoRaWAN (TTN) auf demselben SX1262
 
 // ---- V4-Pins (kompatibel zu V3) ----
 #define PIN_OLED_SDA   17
@@ -80,6 +81,16 @@ static float    s_loraLastRssi = 0;
 static char     s_loraLast[24] = "";
 static volatile bool s_loraFlag = false;
 ICACHE_RAM_ATTR void onLoraDio1() { s_loraFlag = true; }
+
+// Stellt den SX1262 nach einem LoRaWAN-Ausflug in den normalen LoRa-Terminal-Zustand
+// zurueck (lorawan_link.cpp ruft diesen Hook). Beim V4 ist der Funk sonst im Standby.
+void ukfe_fsk_restore() {
+    radio.begin(s_loraFreq, 125.0, s_loraSf, 5, 0x34, 10, 8);
+    radio.setTCXO(1.8);
+    radio.setDio2AsRfSwitch(true);
+    if(s_loraOk) radio.setDio1Action(onLoraDio1);
+    if(s_loraRxOn) radio.startReceive(); else radio.standby();
+}
 
 // ---- Menue-Zustand ----
 enum Page { PG_STATUS, PG_GPS, PG_LORA, PG_SATS, PG_INFO, PG_COUNT };
@@ -142,6 +153,13 @@ static void act(const UkfeRfMessage* m) {
         wifi_attack_stop(); evil_portal_stop(); wifi_recon_stop(); toast("Stop"); break;
     case UkfeRfCmdAbort:
         ble_spam_stop(); wifi_attack_stop(); evil_portal_stop(); wifi_recon_stop(); toast("Abort"); break;
+    case UkfeRfCmdLoraJoin: {
+        // SX1262 kurz auf LoRaWAN: OTAA-Join TTN als g4meover-v4 + Uplink, dann LoRa-Terminal zurueck.
+        toast("LoRaWAN Join...");
+        bool ok = lorawan_join_and_uplink("g4meover-v4 online");
+        toast(ok ? "LoRaWAN joined" : "LoRaWAN -1116");
+        break;
+    }
     default: break;   // Status/Ping/LoRa/GPS/HID: bestehendes Verhalten / spaetere Phasen
     }
 }
